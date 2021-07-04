@@ -13,7 +13,7 @@ class EvoTreeOptimization(object):
     '''This class stores evolutionary optimization algorithms to trees based models'''
     
      # inicilaization function
-    def __init__(self, cost_func, bounds, popsize=10, mutate=0.5, recombination=0.7, maxiter=2000,isProba=False,keepTraining=False):
+    def __init__(self, cost_func, bounds, popsize=10, mutate=0.5, recombination=0.7, maxiter=2000,isProba=False,keepTraining=False,balanceData=False):
         self.cost_func=cost_func        
         self.bounds=bounds
         self.popsize=popsize
@@ -26,7 +26,12 @@ class EvoTreeOptimization(object):
         self.globvar = 0 # variable created to tune the output predicted value
         self.isProba = isProba
         self.keepTraining=keepTraining
-        
+        if (balanceData):
+            self.func = self.lgbm_tra_bal
+        else:
+            self.func = self.lgbm_tra
+            
+            
     def ensure_bounds(self,vec):
         vec_new = []
         # cycle through each variable in vector
@@ -110,6 +115,83 @@ class EvoTreeOptimization(object):
            acc += self.cost_func(y_test, y_pred)
 
         return (acc/num_k)
+    
+    def lgbm_tra_bal(self,x,X,y):
+
+        # seleciona os parametros para treinamento
+        params = {
+            'task': 'train',
+            'boosting_type': 'gbdt',
+            'objective': 'xentropy',#'binary',
+            'num_leaves': int(x[1]),      # 31
+            'learning_rate': np.exp(x[2]),   #0.01,
+            'feature_fraction': x[3],#0.9,
+            'bagging_fraction': x[4],#0.8,
+            'bagging_freq': 1,
+            'max_depth': int(x[5]),        #-1,
+            'min_data_in_leaf': int(x[6]), #20,
+            'lambda_l2': x[7],        # 0,
+            'is_unbalance' : True,
+            'max_bin' : int(x[9]),
+            'verbose': -1
+            # min_sum_hessian_in_leaf - tobeadded
+            # lambda_l1 - tobeadded
+            # path_smooth - tobeadded
+        }
+        num_k = 5
+        acc = 0
+        # treina a arvore
+        kf = KFold(n_splits=num_k,random_state=21,shuffle=True)
+
+        self.globvar = x[8]
+        #n_iter = 1
+        for train_index, test_index in kf.split(X):
+
+            preds = []
+            np.random.seed(42)
+            size1s = len(train_index[y[train_index] ==1])
+            onesPer = 0.7 # number of 1s
+            
+            limit = int(size1s*onesPer)
+            
+            #print('fold')
+            for n in np.arange(5): #(15):   
+                #print(n)
+                
+                train_index = np.random.permutation(train_index)
+                #buff = train_index[train_index]
+                part1 = train_index[y[train_index] ==1] # values with 1
+                part1 = np.random.permutation(part1)[0:limit]
+                # same number of values with 0
+                
+
+                part2 = train_index[y[y[train_index]] ==0]
+                part2 = np.random.permutation(part2)
+                
+                # building training data        
+                train_indexMod = np.r_[ part1, part2[0:limit] ]
+
+
+                lgb_train = lgb.Dataset(X[train_indexMod], y[train_indexMod])
+                gbm = lgb.train(params,lgb_train,  num_boost_round=int(x[0]), verbose_eval= 1)
+
+
+                y_prev = gbm.predict(X[test_index])
+                if not(len(preds) ):
+                    preds = y_prev-x[8]
+
+
+                else:
+                    preds = np.c_[preds, y_prev-x[8]]               
+
+            final = np.mean(preds,axis = 1)
+            
+            if (not(self.isProba)):
+                y_pred = np.round(final)
+            
+            acc += self.cost_func(y[test_index], final ) # F1 score
+
+        return (acc/num_k)
 
 
 
@@ -154,7 +236,7 @@ class EvoTreeOptimization(object):
         print('First gen ...')
         scorePop = np.zeros(self.popsize)
         for num, ind in enumerate(population):
-            scorePop[num] = self.lgbm_tra(ind, x_train, y_train)
+            scorePop[num] = self.func(ind, x_train, y_train)
             print(scorePop[num])
 
         # --- SOLVE --------------------------------------------+
@@ -201,7 +283,7 @@ class EvoTreeOptimization(object):
 
                 # --- GREEDY SELECTION (step #3.C) -------------+
 
-                score_trial = self.lgbm_tra(v_trial,x_train,y_train)
+                score_trial = self.func(v_trial,x_train,y_train)
                 score_target = scorePop[j]
 
                 if score_trial > score_target:
@@ -288,7 +370,7 @@ class EvoTreeOptimization(object):
 
                 # --- GREEDY SELECTION (step #3.C) -------------+
 
-                score_trial = self.lgbm_tra(v_trial,x_train,y_train)
+                score_trial = self.func(v_trial,x_train,y_train)
                 score_target = scorePop[j]
 
                 if score_trial > score_target:
